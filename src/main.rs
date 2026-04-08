@@ -1,4 +1,4 @@
-use clap::{arg, command, Parser};
+use clap::Parser;
 
 pub mod command;
 pub use command::{Command, Commit, CommitArgs};

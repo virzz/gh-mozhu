@@ -131,7 +131,7 @@ pub fn execute(args: &Args) {
                 if args.hide_icon {
                     header.push_str(format!("{}({})", ct.name(), scope).as_str());
                 } else {
-                    header.push_str(format!("{}{}({})", ct.icon(), ct.name(), scope).as_str());
+                    header.push_str(format!("{} {}({})", ct.icon(), ct.name(), scope).as_str());
                 }
             }
         }
