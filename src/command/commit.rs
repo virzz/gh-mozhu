@@ -84,7 +84,7 @@ impl CommitType {
             CommitType::Perf => "🚀",
             CommitType::Test => "🧪",
             CommitType::Chore => "🔧",
-            CommitType::Revert => "↩",
+            CommitType::Revert => "🙃",
         }
     }
 
@@ -205,5 +205,23 @@ mod tests {
     #[test]
     fn test_commit_execute() {
         execute(&Args::parse_from(&["--help"]));
+    }
+
+    #[test]
+    fn test_print_commit_types() {
+        let commit_types: Vec<CommitType> = vec![
+            CommitType::Feature,
+            CommitType::Refactor,
+            CommitType::Perf,
+            CommitType::Fix,
+            CommitType::Test,
+            CommitType::Chore,
+            CommitType::Docs,
+            CommitType::Style,
+            CommitType::Revert,
+        ];
+        for ct in commit_types {
+            println!("- {} {}", ct.icon(), ct.name(),);
+        }
     }
 }
