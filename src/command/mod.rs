@@ -2,8 +2,8 @@ use clap::Subcommand;
 
 pub mod bump;
 pub mod commit;
-pub use bump::{execute as Bump, Args as BumpArgs};
-pub use commit::{execute as Commit, Args as CommitArgs, CommitType};
+pub use bump::{Args as BumpArgs, execute as Bump};
+pub use commit::{Args as CommitArgs, CommitType, execute as Commit};
 
 #[derive(Subcommand)]
 pub enum Command {

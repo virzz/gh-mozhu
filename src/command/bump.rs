@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use toml_edit::{value, DocumentMut, Item};
+use toml_edit::{DocumentMut, Item, value};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
