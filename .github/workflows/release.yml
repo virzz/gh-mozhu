@@ -5,12 +5,22 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish or repair
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   test:
@@ -19,6 +29,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -32,8 +44,8 @@ jobs:
       - name: Run tests
         run: cargo test --locked --all-targets
 
-  release:
-    name: Release ${{ matrix.asset_suffix }}
+  build:
+    name: Build ${{ matrix.asset_suffix }}
     needs: test
     strategy:
       fail-fast: false
@@ -43,22 +55,28 @@ jobs:
             target: x86_64-unknown-linux-gnu
             asset_suffix: linux-amd64
             binary: gh-mozhu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            asset_suffix: linux-arm64
+
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            asset_suffix: darwin-amd64
             binary: gh-mozhu
-          - os: macos-14
+
+          - os: macos-15
             target: aarch64-apple-darwin
             asset_suffix: darwin-arm64
             binary: gh-mozhu
+
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset_suffix: windows-amd64.exe
             binary: gh-mozhu.exe
+
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -77,8 +95,28 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/gh-mozhu-${{ matrix.asset_suffix }}"
 
-      - name: Upload release asset
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset_suffix }}
+          path: dist/gh-mozhu-${{ matrix.asset_suffix }}
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/gh-mozhu-${{ matrix.asset_suffix }}
+          files: dist/gh-mozhu-*
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          tag_name: ${{ env.RELEASE_TAG }}
