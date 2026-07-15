@@ -1,7 +1,7 @@
 use clap::Parser;
 
 pub mod command;
-pub use command::{Command, Commit, CommitArgs};
+pub use command::{Bump, BumpArgs, Command, Commit, CommitArgs};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -17,6 +17,12 @@ fn main() {
     let cli = Args::parse();
 
     match &cli.command {
+        Command::Bump(args) => {
+            if let Err(error) = Bump(args) {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
+        }
         Command::Commit(c) => Commit(c),
     }
 }
