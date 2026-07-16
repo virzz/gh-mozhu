@@ -9,6 +9,8 @@ format commit messages for github
 Create the next SemVer tag on `main`. Tags use the `v` prefix.
 For Rust projects, `bump` updates the nearest `Cargo.toml` version and the
 existing workspace `Cargo.lock`, commits both files, then creates the tag.
+For Node.js and Bun projects, it updates and commits the nearest
+`package.json` version before creating the tag.
 
 ```shell
 gh mozhu bump              # patch: v1.2.3 -> v1.2.4

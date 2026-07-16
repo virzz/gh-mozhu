@@ -153,7 +153,7 @@ pub fn execute(args: &Args) {
 
     let mut footer: Vec<String> = vec![];
     let closes = args.closes.clone();
-    if closes.len() > 0 {
+    if !closes.is_empty() {
         footer.push(format!(
             "Closes: {}",
             closes
@@ -165,17 +165,17 @@ pub fn execute(args: &Args) {
     }
 
     let breaks = args.breaks.clone();
-    if breaks.len() > 0 {
+    if !breaks.is_empty() {
         footer.push(format!("Breaks: {}", breaks.join(", ")));
     }
 
-    let result = if footer.len() > 0 {
-        if body.len() > 0 {
+    let result = if !footer.is_empty() {
+        if !body.is_empty() {
             format!("{}\n\n{}\n\n{}", header, body, footer.join("\n"))
         } else {
             format!("{}\n\n\n\n{}", header, footer.join("\n"))
         }
-    } else if body.len() > 0 {
+    } else if !body.is_empty() {
         format!("{}\n\n{}", header, body)
     } else {
         header
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_commit_execute() {
-        execute(&Args::parse_from(&["--help"]));
+        execute(&Args::parse_from(["--help"]));
     }
 
     #[test]

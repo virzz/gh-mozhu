@@ -3,6 +3,7 @@ use semver::{BuildMetadata, Prerelease, Version};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use toml_edit::{DocumentMut, Item, value};
@@ -42,6 +43,18 @@ struct RustProject {
     manifest: PathBuf,
 }
 
+#[derive(Debug)]
+struct NodeProject {
+    root: PathBuf,
+    manifest: PathBuf,
+}
+
+#[derive(Debug)]
+enum Project {
+    Rust(RustProject),
+    Node(NodeProject),
+}
+
 #[derive(Clone, Copy)]
 enum VersionField {
     Package,
@@ -63,8 +76,10 @@ pub fn execute(args: &Args) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(project) = find_rust_project(root.clone())? {
-        bump_rust_project(&project, &next)?;
+    match find_project(root.clone())? {
+        Some(Project::Rust(project)) => bump_rust_project(&project, &next)?,
+        Some(Project::Node(project)) => bump_node_project(&project, &next)?,
+        None => {}
     }
 
     create_tag(&root, &next_tag)?;
@@ -95,7 +110,7 @@ fn git_root() -> Result<PathBuf> {
     Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()).canonicalize()?)
 }
 
-fn find_rust_project(root: PathBuf) -> Result<Option<RustProject>> {
+fn find_project(root: PathBuf) -> Result<Option<Project>> {
     let mut directory = std::env::current_dir()?.canonicalize()?;
     if !directory.starts_with(&root) {
         return Err("current directory is outside the Git repository".into());
@@ -104,12 +119,143 @@ fn find_rust_project(root: PathBuf) -> Result<Option<RustProject>> {
     loop {
         let manifest = directory.join("Cargo.toml");
         if manifest.is_file() {
-            return Ok(Some(RustProject { root, manifest }));
+            return Ok(Some(Project::Rust(RustProject { root, manifest })));
+        }
+        let manifest = directory.join("package.json");
+        if manifest.is_file() {
+            return Ok(Some(Project::Node(NodeProject { root, manifest })));
         }
         if directory == root || !directory.pop() {
             return Ok(None);
         }
     }
+}
+
+fn bump_node_project(project: &NodeProject, next: &Version) -> Result<()> {
+    ensure_node_manifest_clean(project)?;
+
+    let content = fs::read_to_string(&project.manifest)?;
+    let updated = update_package_json_version(&content, next)?;
+    if updated == content {
+        return Err(format!("package.json version is already {next}").into());
+    }
+    fs::write(&project.manifest, updated)?;
+
+    let manifest = project.manifest.strip_prefix(&project.root)?;
+    let message = format!("🔧 chore(ver): 更新版本至 v{next}");
+    let output = Command::new("git")
+        .current_dir(&project.root)
+        .args(["commit", "--only", "-m", &message, "--"])
+        .arg(manifest)
+        .output()?;
+    if !output.status.success() {
+        return Err(command_error("git commit", &output.stderr).into());
+    }
+    Ok(())
+}
+
+fn ensure_node_manifest_clean(project: &NodeProject) -> Result<()> {
+    let manifest = project.manifest.strip_prefix(&project.root)?;
+    let output = Command::new("git")
+        .current_dir(&project.root)
+        .args(["status", "--porcelain", "--"])
+        .arg(manifest)
+        .output()?;
+    if !output.status.success() {
+        return Err(command_error("git status", &output.stderr).into());
+    }
+    if !output.stdout.is_empty() {
+        return Err("package.json has uncommitted changes".into());
+    }
+    Ok(())
+}
+
+fn update_package_json_version(content: &str, next: &Version) -> Result<String> {
+    let document: serde_json::Value = serde_json::from_str(content)?;
+    let current = document
+        .as_object()
+        .ok_or("package.json root must be an object")?
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("package.json does not define a string version field")?;
+    Version::parse(current)?;
+
+    let range = package_version_range(content)?;
+    let replacement = serde_json::to_string(&next.to_string())?;
+    let mut updated = String::with_capacity(content.len() + replacement.len());
+    updated.push_str(&content[..range.start]);
+    updated.push_str(&replacement);
+    updated.push_str(&content[range.end..]);
+    Ok(updated)
+}
+
+fn package_version_range(content: &str) -> Result<Range<usize>> {
+    let bytes = content.as_bytes();
+    let mut containers = Vec::new();
+    let mut ranges = Vec::new();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' | b'[' => {
+                containers.push(bytes[index]);
+                index += 1;
+            }
+            b'}' | b']' => {
+                containers.pop();
+                index += 1;
+            }
+            b'"' => {
+                let end = json_string_end(bytes, index)
+                    .ok_or("package.json contains an unterminated string")?;
+                if containers.as_slice() == *b"{" {
+                    let key: String = serde_json::from_str(&content[index..=end])?;
+                    let colon = skip_json_whitespace(bytes, end + 1);
+                    if key == "version" && bytes.get(colon) == Some(&b':') {
+                        let value_start = skip_json_whitespace(bytes, colon + 1);
+                        if bytes.get(value_start) != Some(&b'"') {
+                            return Err("package.json version must be a string".into());
+                        }
+                        let value_end = json_string_end(bytes, value_start)
+                            .ok_or("package.json contains an unterminated version string")?;
+                        ranges.push(value_start..value_end + 1);
+                        index = value_end + 1;
+                        continue;
+                    }
+                }
+                index = end + 1;
+            }
+            _ => index += 1,
+        }
+    }
+
+    match ranges.as_slice() {
+        [range] => Ok(range.clone()),
+        [] => Err("package.json does not define a version field".into()),
+        _ => Err("package.json defines version more than once".into()),
+    }
+}
+
+fn json_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => return Some(index),
+            b'\\' => index += 2,
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_json_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        index += 1;
+    }
+    index
 }
 
 fn bump_rust_project(project: &RustProject, next: &Version) -> Result<()> {
@@ -388,6 +534,59 @@ mod tests {
         let manifest = "[workspace.package]\nversion = \"1.2.3\"\n";
         let updated = update_manifest_version(manifest, &Version::new(1, 3, 0)).unwrap();
         assert!(updated.contains("version = \"1.3.0\""));
+    }
+
+    #[test]
+    fn updates_only_package_json_version() {
+        let manifest = concat!(
+            "{\n",
+            "  \"name\": \"demo\",\n",
+            "  \"metadata\": { \"version\": \"unchanged\" },\n",
+            "  \"version\": \"1.2.3\"\n",
+            "}\n"
+        );
+        let updated = update_package_json_version(manifest, &Version::new(1, 2, 4)).unwrap();
+        assert_eq!(updated, manifest.replace("\"1.2.3\"", "\"1.2.4\""));
+    }
+
+    #[test]
+    fn commits_package_json_before_creating_tag() {
+        let root = temp_repository();
+        let manifest = root.join("package.json");
+        fs::write(
+            &manifest,
+            "{\n  \"name\": \"demo\",\n  \"version\": \"1.2.3\"\n}\n",
+        )
+        .unwrap();
+        git(&root, &["add", "package.json"]);
+        git(&root, &["commit", "-m", "initial"]);
+
+        let project = NodeProject {
+            root: root.clone(),
+            manifest,
+        };
+        bump_node_project(&project, &Version::new(1, 2, 4)).unwrap();
+        create_tag(&root, "v1.2.4").unwrap();
+
+        let content = fs::read_to_string(root.join("package.json")).unwrap();
+        assert!(content.contains("\"version\": \"1.2.4\""));
+        assert_eq!(
+            git(&root, &["log", "-1", "--format=%s"]),
+            "🔧 chore(ver): 更新版本至 v1.2.4"
+        );
+        assert_eq!(
+            git(
+                &root,
+                &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+            ),
+            "package.json"
+        );
+        assert_eq!(
+            git(&root, &["rev-parse", "HEAD"]),
+            git(&root, &["rev-list", "-1", "v1.2.4"])
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
