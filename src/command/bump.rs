@@ -65,20 +65,23 @@ pub fn execute(args: &Args) -> Result<()> {
     ensure_main_branch()?;
     let root = git_root()?;
 
-    let current = latest_version()?;
-    let next = bump_version(current.clone(), args.level())?;
-    let current_tag = format!("v{current}");
+    let current = latest_version(&root)?;
+    let initializing = current.is_none();
+    let next = next_version(current.as_ref(), args.level())?;
     let next_tag = format!("v{next}");
 
     let needs_confirmation = args.major || (args.minor && !args.yes);
-    if needs_confirmation && !confirm(&current_tag, &next_tag)? {
-        println!("Canceled");
-        return Ok(());
+    if let Some(current) = &current {
+        let current_tag = format!("v{current}");
+        if needs_confirmation && !confirm(&current_tag, &next_tag)? {
+            println!("Canceled");
+            return Ok(());
+        }
     }
 
     match find_project(root.clone())? {
-        Some(Project::Rust(project)) => bump_rust_project(&project, &next)?,
-        Some(Project::Node(project)) => bump_node_project(&project, &next)?,
+        Some(Project::Rust(project)) => bump_rust_project(&project, &next, initializing)?,
+        Some(Project::Node(project)) => bump_node_project(&project, &next, initializing)?,
         None => {}
     }
 
@@ -131,12 +134,15 @@ fn find_project(root: PathBuf) -> Result<Option<Project>> {
     }
 }
 
-fn bump_node_project(project: &NodeProject, next: &Version) -> Result<()> {
+fn bump_node_project(project: &NodeProject, next: &Version, allow_unchanged: bool) -> Result<()> {
     ensure_node_manifest_clean(project)?;
 
     let content = fs::read_to_string(&project.manifest)?;
     let updated = update_package_json_version(&content, next)?;
     if updated == content {
+        if allow_unchanged {
+            return Ok(());
+        }
         return Err(format!("package.json version is already {next}").into());
     }
     fs::write(&project.manifest, updated)?;
@@ -258,13 +264,16 @@ fn skip_json_whitespace(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-fn bump_rust_project(project: &RustProject, next: &Version) -> Result<()> {
+fn bump_rust_project(project: &RustProject, next: &Version, allow_unchanged: bool) -> Result<()> {
     let lockfile = cargo_lockfile(project)?;
     ensure_project_files_clean(project, lockfile.as_deref())?;
 
     let content = fs::read_to_string(&project.manifest)?;
     let updated = update_manifest_version(&content, next)?;
     if updated == content {
+        if allow_unchanged {
+            return Ok(());
+        }
         return Err(format!("Cargo.toml version is already {next}").into());
     }
     fs::write(&project.manifest, updated)?;
@@ -418,22 +427,33 @@ fn ensure_main_branch() -> Result<()> {
     Ok(())
 }
 
-fn latest_version() -> Result<Version> {
-    let output = Command::new("git").args(["tag", "--list", "v*"]).output()?;
+fn latest_version(root: &Path) -> Result<Option<Version>> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["tag", "--list", "v*"])
+        .output()?;
     if !output.status.success() {
         return Err(command_error("git tag --list", &output.stderr).into());
     }
 
-    String::from_utf8(output.stdout)?
-        .lines()
-        .filter_map(parse_tag)
-        .max()
-        .ok_or_else(|| "no valid SemVer tag with prefix v found".into())
+    let tags = String::from_utf8(output.stdout)?;
+    let latest = tags.lines().filter_map(parse_tag).max();
+    if latest.is_none() && !tags.trim().is_empty() {
+        return Err("no valid SemVer tag with prefix v found".into());
+    }
+    Ok(latest)
 }
 
 fn parse_tag(tag: &str) -> Option<Version> {
     tag.strip_prefix('v')
         .and_then(|value| Version::parse(value).ok())
+}
+
+fn next_version(current: Option<&Version>, level: Level) -> Result<Version> {
+    match current {
+        Some(current) => bump_version(current.clone(), level),
+        None => Ok(Version::new(0, 1, 0)),
+    }
 }
 
 fn bump_version(mut version: Version, level: Level) -> Result<Version> {
@@ -523,6 +543,34 @@ mod tests {
     }
 
     #[test]
+    fn initializes_at_v0_1_0_without_tags() {
+        let root = temp_repository();
+        let manifest = root.join("package.json");
+        fs::write(
+            &manifest,
+            "{\n  \"name\": \"demo\",\n  \"version\": \"0.1.0\"\n}\n",
+        )
+        .unwrap();
+        git(&root, &["add", "package.json"]);
+        git(&root, &["commit", "-m", "initial"]);
+
+        let current = latest_version(&root).unwrap();
+        let next = next_version(current.as_ref(), Level::Patch).unwrap();
+        assert_eq!(next, Version::new(0, 1, 0));
+
+        let project = NodeProject {
+            root: root.clone(),
+            manifest,
+        };
+        bump_node_project(&project, &next, true).unwrap();
+        create_tag(&root, &format!("v{next}")).unwrap();
+        assert_eq!(git(&root, &["tag", "--list"]), "v0.1.0");
+        assert_eq!(git(&root, &["rev-list", "--count", "HEAD"]), "1");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn updates_package_manifest_version() {
         let manifest = "[package]\nname = \"demo\"\nversion = \"1.2.3\"\n";
         let updated = update_manifest_version(manifest, &Version::new(1, 2, 4)).unwrap();
@@ -565,7 +613,7 @@ mod tests {
             root: root.clone(),
             manifest,
         };
-        bump_node_project(&project, &Version::new(1, 2, 4)).unwrap();
+        bump_node_project(&project, &Version::new(1, 2, 4), false).unwrap();
         create_tag(&root, "v1.2.4").unwrap();
 
         let content = fs::read_to_string(root.join("package.json")).unwrap();
@@ -608,7 +656,7 @@ mod tests {
             root: root.clone(),
             manifest,
         };
-        bump_rust_project(&project, &Version::new(1, 2, 4)).unwrap();
+        bump_rust_project(&project, &Version::new(1, 2, 4), false).unwrap();
         create_tag(&root, "v1.2.4").unwrap();
 
         let content = fs::read_to_string(root.join("Cargo.toml")).unwrap();
