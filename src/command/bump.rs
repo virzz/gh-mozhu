@@ -28,6 +28,10 @@ pub struct Args {
     /// Skip confirmation for a minor bump
     #[arg(short = 'y', long, requires = "minor")]
     yes: bool,
+
+    /// Print the next tag without a trailing newline
+    #[arg(short = 'n', long)]
+    no_newline: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +91,12 @@ pub fn execute(args: &Args) -> Result<()> {
 
     create_tag(&root, &next_tag)?;
 
-    println!("{next_tag}");
+    if args.no_newline {
+        print!("{next_tag}");
+        io::stdout().flush()?;
+    } else {
+        println!("{next_tag}");
+    }
     Ok(())
 }
 
